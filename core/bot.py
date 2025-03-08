@@ -1,11 +1,12 @@
-import time
+import asyncio
 import random
 import logging
-import asyncio
+import pickle
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from functools import lru_cache
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from ..data_acquisition.realtime_prices import PriceFetcher
 from ..strategy.momentum_scalping import MomentumScalper
@@ -25,10 +26,11 @@ class State:
     sentiment_score: float
     volume: float
     volatility: float  # Added volatility for dynamic position sizing
+    time_since_last_trade: float  # Time since the last trade in seconds
 
-    def to_tuple(self) -> Tuple[float, float, float, float]:
+    def to_tuple(self) -> Tuple[float, float, float, float, float]:
         """Convert state to tuple for use as dictionary key."""
-        return (self.price_change, self.sentiment_score, self.volume, self.volatility)
+        return (self.price_change, self.sentiment_score, self.volume, self.volatility, self.time_since_last_trade)
 
 
 class TradingBot:
@@ -44,6 +46,7 @@ class TradingBot:
     API_CALL_INTERVAL = 1  # Rate limit: 1 API call per second
     PARTIAL_SELL_PERCENTAGE = 0.25  # Percentage to sell gradually during a surge
     DYNAMIC_POSITION_SCALING = True  # Enable dynamic position sizing based on volatility
+    Q_TABLE_FILE = "q_table.pkl"  # File to persist Q-table
 
     def __init__(self):
         """Initialize the trading bot and all integrated components."""
@@ -59,13 +62,15 @@ class TradingBot:
         self.wallet_address = self._initialize_wallet()
         self.active_positions: Dict[str, float] = {}  # token_address -> entry_price
         self.hold_mode: Dict[str, bool] = {}  # token_address -> surge hold flag
+        self.last_trade_time: Dict[str, datetime] = {}  # token_address -> last trade time
 
         # Reinforcement Learning setup
-        self.q_table: Dict[Tuple, Dict[str, float]] = {}
+        self.q_table: Dict[Tuple, Dict[str, float]] = self._load_q_table()
         self.learning_rate = 0.1
         self.discount_factor = 0.9
         self.epsilon = 1.0  # Exploration rate
         self.epsilon_decay_rate = 0.001
+        self.q_table_lock = asyncio.Lock()  # Lock for concurrent Q-table updates
 
         # Rate limiting and caching for price data
         self.last_api_call_time = datetime.now()
@@ -86,6 +91,25 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Private key is invalid or missing: {e}")
         return ""
+
+    def _load_q_table(self) -> Dict[Tuple, Dict[str, float]]:
+        """Load Q-table from a file if it exists."""
+        if Path(self.Q_TABLE_FILE).exists():
+            try:
+                with open(self.Q_TABLE_FILE, "rb") as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load Q-table: {e}")
+        return {}
+
+    async def _save_q_table(self) -> None:
+        """Save Q-table to a file."""
+        async with self.q_table_lock:
+            try:
+                with open(self.Q_TABLE_FILE, "wb") as f:
+                    pickle.dump(self.q_table, f)
+            except Exception as e:
+                logger.error(f"Failed to save Q-table: {e}")
 
     @async_retry_with_backoff(retries=3, backoff_in_seconds=2)
     async def _fetch_price_data_batch(self, token_addresses: List[str]) -> Dict[str, Dict]:
@@ -134,28 +158,34 @@ class TradingBot:
         # Calculate volatility (standard deviation of price changes over a short period)
         volatility = await self.price_fetcher.calculate_volatility(token_address)
 
+        # Calculate time since last trade
+        last_trade_time = self.last_trade_time.get(token_address, datetime.now())
+        time_since_last_trade = (datetime.now() - last_trade_time).total_seconds()
+
         return State(
             price_change=price_change,
             sentiment_score=sentiment_score,
             volume=price_data['volume_24h'],
-            volatility=volatility
+            volatility=volatility,
+            time_since_last_trade=time_since_last_trade
         )
 
-    def choose_action(self, state: Optional[State]) -> str:
+    async def choose_action(self, state: Optional[State]) -> str:
         """Select an action (buy, sell, or hold) based on the current state using Q-learning."""
         if not state:
             return 'hold'
 
         state_tuple = state.to_tuple()
-        if state_tuple not in self.q_table:
-            self.q_table[state_tuple] = {action: 0 for action in self.ACTIONS}
+        async with self.q_table_lock:
+            if state_tuple not in self.q_table:
+                self.q_table[state_tuple] = {action: 0 for action in self.ACTIONS}
 
-        # Exploration vs. Exploitation decision
-        if random.uniform(0, 1) < self.epsilon:
-            return random.choice(self.ACTIONS)
-        return max(self.q_table[state_tuple], key=self.q_table[state_tuple].get)
+            # Exploration vs. Exploitation decision
+            if random.uniform(0, 1) < self.epsilon:
+                return random.choice(self.ACTIONS)
+            return max(self.q_table[state_tuple], key=self.q_table[state_tuple].get)
 
-    def update_q_value(self, state: State, action: str, reward: float, next_state: State) -> None:
+    async def update_q_value(self, state: State, action: str, reward: float, next_state: State) -> None:
         """Update Q-table values based on observed rewards and the transition to the next state."""
         if not state or not next_state:
             return
@@ -163,22 +193,23 @@ class TradingBot:
         state_tuple = state.to_tuple()
         next_state_tuple = next_state.to_tuple()
 
-        if state_tuple not in self.q_table:
-            self.q_table[state_tuple] = {action: 0 for action in self.ACTIONS}
-        if next_state_tuple not in self.q_table:
-            self.q_table[next_state_tuple] = {action: 0 for action in self.ACTIONS}
+        async with self.q_table_lock:
+            if state_tuple not in self.q_table:
+                self.q_table[state_tuple] = {action: 0 for action in self.ACTIONS}
+            if next_state_tuple not in self.q_table:
+                self.q_table[next_state_tuple] = {action: 0 for action in self.ACTIONS}
 
-        best_next_action = max(self.q_table[next_state_tuple], key=self.q_table[next_state_tuple].get)
-        td_target = reward + self.discount_factor * self.q_table[next_state_tuple][best_next_action]
-        td_error = td_target - self.q_table[state_tuple][action]
-        self.q_table[state_tuple][action] += self.learning_rate * td_error
+            best_next_action = max(self.q_table[next_state_tuple], key=self.q_table[next_state_tuple].get)
+            td_target = reward + self.discount_factor * self.q_table[next_state_tuple][best_next_action]
+            td_error = td_target - self.q_table[state_tuple][action]
+            self.q_table[state_tuple][action] += self.learning_rate * td_error
 
-        # Maintain Q-table size
-        if len(self.q_table) > self.MAX_Q_TABLE_SIZE:
-            oldest_state = next(iter(self.q_table))
-            del self.q_table[oldest_state]
+            # Maintain Q-table size
+            if len(self.q_table) > self.MAX_Q_TABLE_SIZE:
+                oldest_state = next(iter(self.q_table))
+                del self.q_table[oldest_state]
 
-    def reward_function(self, initial_price: float, final_price: float, action: str) -> float:
+    async def reward_function(self, initial_price: float, final_price: float, action: str) -> float:
         """Define reward based on profit percentage and the action taken."""
         profit_percentage = (final_price - initial_price) / initial_price * 100
         if action == 'buy':
@@ -198,7 +229,7 @@ class TradingBot:
                 logger.warning(f"Could not retrieve initial state for {token_address}. Skipping episode.")
                 continue
 
-            action = self.choose_action(state)
+            action = await self.choose_action(state)
             price_data = await self._fetch_price_data(token_address)
             if not price_data:
                 continue
@@ -206,10 +237,10 @@ class TradingBot:
             initial_price = price_data['price_usd']
             await asyncio.sleep(1)  # Simulate time passage between states
             final_price = (await self._fetch_price_data(token_address))['price_usd']
-            reward = self.reward_function(initial_price, final_price, action)
+            reward = await self.reward_function(initial_price, final_price, action)
             next_state = await self.get_state(token_address)
             if next_state:
-                self.update_q_value(state, action, reward, next_state)
+                await self.update_q_value(state, action, reward, next_state)
 
             # Decay exploration rate gradually
             self.epsilon = max(self.epsilon - self.epsilon_decay_rate, self.MIN_EPSILON)
@@ -217,6 +248,7 @@ class TradingBot:
                 logger.info(f"Episode {episode}/{episodes}, epsilon: {self.epsilon:.4f}")
 
         logger.info(f"Training completed on {token_address}. Final epsilon: {self.epsilon:.4f}")
+        await self._save_q_table()
 
     @async_retry_with_backoff(retries=3, backoff_in_seconds=2)
     async def execute_buy(self, token_address: str, state: Optional[State] = None) -> bool:
@@ -247,6 +279,7 @@ class TradingBot:
                 return False
 
             self.active_positions[token_address] = price_data['price_usd']
+            self.last_trade_time[token_address] = datetime.now()
             # Reset hold mode flag on new position
             self.hold_mode[token_address] = False
             logger.info(f"Bought {token_address} at {price_data['price_usd']}.")
@@ -305,7 +338,7 @@ class TradingBot:
 
         # If we don't hold and no active position exists, consider buying
         if token_address not in self.active_positions and not self.hold_mode.get(token_address, False):
-            action = self.choose_action(state)
+            action = await self.choose_action(state)
             if action == 'buy':
                 await self.execute_buy(token_address, state)
             return
@@ -330,7 +363,7 @@ class TradingBot:
             await self.execute_sell(token_address, partial=True, reason="surge hold partial exit")
         else:
             # Otherwise, follow the standard strategy: if action suggests selling, exit fully.
-            action = self.choose_action(state)
+            action = await self.choose_action(state)
             if action == 'sell':
                 await self.execute_sell(token_address, partial=False, reason="strategy")
 
@@ -359,3 +392,5 @@ class TradingBot:
             logger.info("Trading loop stopped by user.")
         except Exception as e:
             logger.error(f"Critical error in trading loop: {e}")
+        finally:
+            await self._save_q_table()
