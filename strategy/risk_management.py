@@ -12,7 +12,7 @@ class RiskManager:
         Calculates the position size based on risk percentage and SOL price.
 
         Args:
-            risk_percentage (float): The percentage of the initial investment to risk on a single trade (e.g., 0.02 for 2%).
+            risk_percentage (float): The percentage of the initial investment to risk on a single trade.
 
         Returns:
             float: The amount of SOL to buy for the position.
@@ -20,11 +20,12 @@ class RiskManager:
         try:
             sol_price = get_solana_price_usd()
             if not sol_price:
-                logger.error("Could not fetch SOL price.  Using a default SOL price of $20.")
-                sol_price = 20  #Default price
-            #Amount to risk on trade.
+                logger.error("Could not fetch SOL price. Using a default SOL price of $20.")
+                sol_price = 20  # Default price
+
+            # Amount to risk on trade
             risk_amount_usd = self.initial_investment_usd * risk_percentage
-            #Amount of SOL to buy
+            # Amount of SOL to buy
             sol_to_buy = risk_amount_usd / sol_price
             logger.info(f"Calculated position size: Risking ${risk_amount_usd:.2f} to buy {sol_to_buy:.4f} SOL (SOL price: ${sol_price:.2f})")
             return sol_to_buy
@@ -67,14 +68,15 @@ class RiskManager:
 # Example Usage
 if __name__ == '__main__':
     risk_manager = RiskManager()
-    #Risk percentage that will be used against the initial investment for trade.
-    position_size = risk_manager.calculate_position_size(risk_percentage = 0.02)
+    
+    # Calculate position size based on risk percentage
+    position_size = risk_manager.calculate_position_size(risk_percentage=0.02)
     print(f"Position size: {position_size} SOL")
 
-    entry_price = 0.001234
+    entry_price = 0.001234  # Example entry price
     stop_loss_price = risk_manager.calculate_stop_loss_price(entry_price)
     print(f"Stop-loss price: {stop_loss_price}")
 
-    current_price = 0.0011
+    current_price = 0.0011  # Example current price
     stop_loss_triggered = risk_manager.check_stop_loss(current_price, stop_loss_price)
     print(f"Stop-loss triggered: {stop_loss_triggered}")
