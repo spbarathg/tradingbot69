@@ -1,8 +1,6 @@
-import time
 import asyncio
 import aiohttp
-from typing import Optional, Dict, List
-from functools import lru_cache
+from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timedelta
 
 from ..utils.logger import logger
@@ -19,6 +17,7 @@ class PriceFetcher:
         self.last_api_call_time = datetime.now()
         self.api_call_interval = timedelta(seconds=1)  # Rate limit: 1 call per second
         self.price_cache: Dict[str, Tuple[Dict, datetime]] = {}  # token_address -> (price_data, timestamp)
+        self.cache_ttl = timedelta(seconds=60)  # Cache TTL: 60 seconds
 
     async def get_price_dexscreener(self, token_address: str, max_retries: int = 3, retry_delay: int = 2) -> Optional[Dict[str, float]]:
         """
@@ -27,16 +26,13 @@ class PriceFetcher:
         # Check cache first
         if token_address in self.price_cache:
             price_data, timestamp = self.price_cache[token_address]
-            if datetime.now() - timestamp < timedelta(seconds=60):  # Cache TTL: 60 seconds
+            if datetime.now() - timestamp < self.cache_ttl:
                 return price_data
 
         for attempt in range(max_retries):
             try:
                 # Rate limiting
-                time_since_last_call = datetime.now() - self.last_api_call_time
-                if time_since_last_call < self.api_call_interval:
-                    await asyncio.sleep((self.api_call_interval - time_since_last_call).total_seconds())
-                self.last_api_call_time = datetime.now()
+                await self._enforce_rate_limit()
 
                 url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
                 async with aiohttp.ClientSession() as session:
@@ -68,10 +64,7 @@ class PriceFetcher:
         Fetches price data for multiple tokens in a single batch request.
         """
         # Rate limiting
-        time_since_last_call = datetime.now() - self.last_api_call_time
-        if time_since_last_call < self.api_call_interval:
-            await asyncio.sleep((self.api_call_interval - time_since_last_call).total_seconds())
-        self.last_api_call_time = datetime.now()
+        await self._enforce_rate_limit()
 
         try:
             url = "https://api.dexscreener.com/latest/dex/tokens"
@@ -96,17 +89,36 @@ class PriceFetcher:
         """
         Parse the price data from the Dexscreener API response.
         """
-        if data.get("pairs"):
-            pair = data["pairs"][0]
+        if not data.get("pairs"):
+            return None
+
+        pair = data["pairs"][0]
+        try:
             price_usd = float(pair["priceUsd"])
             liquidity_usd = float(pair["liquidity"]["usd"])
+            volume_24h = float(pair["volume"]["h24"])
 
-            if price_usd > 0 and liquidity_usd > 0:
-                return {
-                    "price_usd": price_usd,
-                    "base_token_symbol": pair["baseToken"]["symbol"],
-                    "quote_token_symbol": pair["quoteToken"]["symbol"],
-                    "volume_24h": float(pair["volume"]["h24"]),
-                    "liquidity_usd": liquidity_usd
-                }
-        return None
+            # Validate numeric values
+            if price_usd <= 0 or liquidity_usd <= 0 or volume_24h < 0:
+                logger.warning(f"Invalid price data: price_usd={price_usd}, liquidity_usd={liquidity_usd}, volume_24h={volume_24h}")
+                return None
+
+            return {
+                "price_usd": price_usd,
+                "base_token_symbol": pair["baseToken"]["symbol"],
+                "quote_token_symbol": pair["quoteToken"]["symbol"],
+                "volume_24h": volume_24h,
+                "liquidity_usd": liquidity_usd
+            }
+        except (KeyError, ValueError) as e:
+            logger.error(f"Failed to parse price data: {e}")
+            return None
+
+    async def _enforce_rate_limit(self) -> None:
+        """
+        Ensures API calls respect the rate limit.
+        """
+        time_since_last_call = datetime.now() - self.last_api_call_time
+        if time_since_last_call < self.api_call_interval:
+            await asyncio.sleep((self.api_call_interval - time_since_last_call).total_seconds())
+        self.last_api_call_time = datetime.now()

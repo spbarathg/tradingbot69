@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional, Dict
+from typing import Dict, Optional
 from solders.rpc.api import Client
 from solders.rpc.config import RpcContextConfig
 from solders.signature import Signature
@@ -15,7 +15,9 @@ class TxMonitor:
         """Initialize the transaction monitor with a Solana RPC client."""
         self.rpc_client = Client(config.SOLANA_RPC_URL)
         self.max_retries = 5  # Maximum number of retries for transaction confirmation
-        self.retry_delay = 2  # Delay between retries in seconds
+        self.retry_delay = 2  # Initial delay between retries in seconds
+        self.rate_limit_interval = timedelta(seconds=1)  # Rate limit: 1 call per second
+        self.last_api_call_time = datetime.now()
 
     async def confirm_transaction(self, tx_signature: str) -> bool:
         """
@@ -30,11 +32,14 @@ class TxMonitor:
         signature = Signature.from_string(tx_signature)
         for attempt in range(self.max_retries):
             try:
+                # Rate limiting
+                await self._enforce_rate_limit()
+
                 # Fetch the transaction status
                 tx_status = await self.rpc_client.get_signature_status(signature, RpcContextConfig(commitment="confirmed"))
                 if tx_status is None:
                     logger.warning(f"Transaction {tx_signature} not found (attempt {attempt + 1}/{self.max_retries})")
-                    await asyncio.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
                     continue
 
                 # Check if the transaction is confirmed
@@ -43,10 +48,10 @@ class TxMonitor:
                     return True
                 else:
                     logger.warning(f"Transaction {tx_signature} not yet finalized (attempt {attempt + 1}/{self.max_retries})")
-                    await asyncio.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
             except Exception as e:
                 logger.error(f"Error confirming transaction {tx_signature}: {e}")
-                await asyncio.sleep(self.retry_delay)
+                await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
 
         logger.error(f"Failed to confirm transaction {tx_signature} after {self.max_retries} attempts.")
         return False
@@ -65,6 +70,8 @@ class TxMonitor:
         for token_address, tx_signature in tx_signatures.items():
             confirmed = await self.confirm_transaction(tx_signature)
             results[token_address] = confirmed
+            if not confirmed:
+                await self.handle_failed_transaction(tx_signature, token_address)
         return results
 
     async def handle_failed_transaction(self, tx_signature: str, token_address: str) -> None:
@@ -89,3 +96,12 @@ class TxMonitor:
         """
         # Example: Integrate with a notification service (e.g., Slack, Telegram)
         logger.info(f"ALERT: {message}")
+
+    async def _enforce_rate_limit(self) -> None:
+        """
+        Ensures API calls respect the rate limit.
+        """
+        time_since_last_call = datetime.now() - self.last_api_call_time
+        if time_since_last_call < self.rate_limit_interval:
+            await asyncio.sleep((self.rate_limit_interval - time_since_last_call).total_seconds())
+        self.last_api_call_time = datetime.now()

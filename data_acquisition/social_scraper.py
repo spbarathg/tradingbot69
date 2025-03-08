@@ -1,9 +1,7 @@
 import asyncio
 import os
-import time
 import random
-from typing import List, Dict, Optional
-from functools import lru_cache
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 
 import snscrape.modules.twitter as sntwitter
@@ -39,27 +37,28 @@ class SocialScraper:
         self.last_reddit_call_time = datetime.now()
         self.reddit_call_interval = timedelta(seconds=1)  # Rate limit: 1 call per second
         self.scraped_data_cache: Dict[str, Tuple[List[str], datetime]] = {}  # query/subreddit -> (data, timestamp)
+        self.cache_ttl = timedelta(seconds=60)  # Cache TTL: 60 seconds
 
     async def scrape_twitter(self, query: str, num_tweets: int = 100, max_retries: int = 3) -> List[str]:
         """Scrapes tweets from Twitter using snscrape with rate limiting and retries."""
         # Check cache first
         if query in self.scraped_data_cache:
             tweets, timestamp = self.scraped_data_cache[query]
-            if datetime.now() - timestamp < timedelta(seconds=60):  # Cache TTL: 60 seconds
+            if datetime.now() - timestamp < self.cache_ttl:
                 return tweets
 
         for attempt in range(max_retries):
             try:
                 # Rate limiting
-                time_since_last_call = datetime.now() - self.last_twitter_call_time
-                if time_since_last_call < self.twitter_call_interval:
-                    await asyncio.sleep((self.twitter_call_interval - time_since_last_call).total_seconds())
-                self.last_twitter_call_time = datetime.now()
+                await self._enforce_rate_limit("twitter")
 
-                tweets = [
-                    tweet.content for i, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items())
-                    if i < num_tweets
-                ]
+                # Use asyncio.to_thread to run synchronous snscrape in a separate thread
+                tweets = await asyncio.to_thread(
+                    lambda: [
+                        tweet.content for i, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items())
+                        if i < num_tweets
+                    ]
+                )
                 # Update cache
                 self.scraped_data_cache[query] = (tweets, datetime.now())
                 return tweets
@@ -78,20 +77,21 @@ class SocialScraper:
         # Check cache first
         if subreddit in self.scraped_data_cache:
             posts, timestamp = self.scraped_data_cache[subreddit]
-            if datetime.now() - timestamp < timedelta(seconds=60):  # Cache TTL: 60 seconds
+            if datetime.now() - timestamp < self.cache_ttl:
                 return posts
 
         for attempt in range(max_retries):
             try:
                 # Rate limiting
-                time_since_last_call = datetime.now() - self.last_reddit_call_time
-                if time_since_last_call < self.reddit_call_interval:
-                    await asyncio.sleep((self.reddit_call_interval - time_since_last_call).total_seconds())
-                self.last_reddit_call_time = datetime.now()
+                await self._enforce_rate_limit("reddit")
 
-                posts = [
-                    submission.title + "\n" + submission.selftext for submission in self.reddit.subreddit(subreddit).hot(limit=num_posts)
-                ]
+                # Use asyncio.to_thread to run synchronous PRAW in a separate thread
+                posts = await asyncio.to_thread(
+                    lambda: [
+                        submission.title + "\n" + submission.selftext
+                        for submission in self.reddit.subreddit(subreddit).hot(limit=num_posts)
+                    ]
+                )
                 # Update cache
                 self.scraped_data_cache[subreddit] = (posts, datetime.now())
                 return posts
@@ -129,3 +129,18 @@ class SocialScraper:
         except Exception as e:
             logger.error(f"Error analyzing batch sentiment: {e}")
             return 0.0
+
+    async def _enforce_rate_limit(self, platform: str) -> None:
+        """
+        Ensures API calls respect the rate limit for the specified platform.
+        """
+        if platform == "twitter":
+            time_since_last_call = datetime.now() - self.last_twitter_call_time
+            if time_since_last_call < self.twitter_call_interval:
+                await asyncio.sleep((self.twitter_call_interval - time_since_last_call).total_seconds())
+            self.last_twitter_call_time = datetime.now()
+        elif platform == "reddit":
+            time_since_last_call = datetime.now() - self.last_reddit_call_time
+            if time_since_last_call < self.reddit_call_interval:
+                await asyncio.sleep((self.reddit_call_interval - time_since_last_call).total_seconds())
+            self.last_reddit_call_time = datetime.now()
