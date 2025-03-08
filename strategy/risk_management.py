@@ -1,13 +1,44 @@
+import asyncio
+from typing import Optional
+from datetime import datetime, timedelta
+from functools import lru_cache
+
 from ..utils.logger import logger
 from ..utils.config import config
 from ..utils.helpers import get_solana_price_usd
+
 
 class RiskManager:
     def __init__(self):
         self.stop_loss_percentage = config.STOP_LOSS_PERCENTAGE
         self.initial_investment_usd = config.INITIAL_INVESTMENT_USD
 
-    def calculate_position_size(self, risk_percentage: float = 0.02) -> float:
+        # Rate limiting and caching
+        self.last_price_fetch_time = datetime.now()
+        self.price_fetch_interval = timedelta(seconds=60)  # Cache SOL price for 60 seconds
+        self.sol_price_cache: Optional[float] = None
+
+    @lru_cache(maxsize=1)
+    async def get_solana_price(self) -> Optional[float]:
+        """Fetches the current SOL price with caching and rate limiting."""
+        if self.sol_price_cache and datetime.now() - self.last_price_fetch_time < self.price_fetch_interval:
+            return self.sol_price_cache
+
+        try:
+            sol_price = await get_solana_price_usd()
+            if not sol_price:
+                logger.error("Could not fetch SOL price. Using a default SOL price of $20.")
+                sol_price = 20  # Default price
+
+            # Update cache
+            self.sol_price_cache = sol_price
+            self.last_price_fetch_time = datetime.now()
+            return sol_price
+        except Exception as e:
+            logger.error(f"Error fetching SOL price: {e}")
+            return None
+
+    async def calculate_position_size(self, risk_percentage: float = 0.02) -> float:
         """
         Calculates the position size based on risk percentage and SOL price.
 
@@ -18,7 +49,7 @@ class RiskManager:
             float: The amount of SOL to buy for the position.
         """
         try:
-            sol_price = get_solana_price_usd()
+            sol_price = await self.get_solana_price()
             if not sol_price:
                 logger.error("Could not fetch SOL price. Using a default SOL price of $20.")
                 sol_price = 20  # Default price
@@ -65,12 +96,13 @@ class RiskManager:
         else:
             return False
 
+
 # Example Usage
-if __name__ == '__main__':
+async def main():
     risk_manager = RiskManager()
     
     # Calculate position size based on risk percentage
-    position_size = risk_manager.calculate_position_size(risk_percentage=0.02)
+    position_size = await risk_manager.calculate_position_size(risk_percentage=0.02)
     print(f"Position size: {position_size} SOL")
 
     entry_price = 0.001234  # Example entry price
@@ -80,3 +112,7 @@ if __name__ == '__main__':
     current_price = 0.0011  # Example current price
     stop_loss_triggered = risk_manager.check_stop_loss(current_price, stop_loss_price)
     print(f"Stop-loss triggered: {stop_loss_triggered}")
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
