@@ -1,0 +1,10 @@
+requests
+beautifulsoup4
+transformers  # For sentiment analysis
+torch         # PyTorch (for transformers)
+solana        # Solana Python SDK
+jupysdk      # Jupiter SDK
+python-dotenv # For loading API keys from .env
+dexpy        # Dexscreener API Library (Install from source due to issues with pip)
+#Optional to install if you have a Solana FM stream already set up
+#solana-fm-py  #Solana FM to monitor new tokens
