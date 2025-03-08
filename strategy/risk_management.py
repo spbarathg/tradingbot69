@@ -65,7 +65,7 @@ class RiskManager:
             logger.error(f"Error calculating position size: {e}")
             return 0.0
 
-    def calculate_stop_loss_price(self, entry_price: float) -> float:
+    async def calculate_stop_loss_price(self, entry_price: float) -> float:
         """
         Calculates the stop-loss price based on the entry price and stop-loss percentage.
 
@@ -75,9 +75,13 @@ class RiskManager:
         Returns:
             float: The stop-loss price.
         """
-        stop_loss_price = entry_price * (1 - self.stop_loss_percentage)
-        logger.info(f"Calculated stop-loss price: {stop_loss_price:.6f} (Entry price: {entry_price:.6f}, Stop-loss percentage: {self.stop_loss_percentage})")
-        return stop_loss_price
+        try:
+            stop_loss_price = entry_price * (1 - self.stop_loss_percentage)
+            logger.info(f"Calculated stop-loss price: {stop_loss_price:.6f} (Entry price: {entry_price:.6f}, Stop-loss percentage: {self.stop_loss_percentage})")
+            return stop_loss_price
+        except Exception as e:
+            logger.error(f"Error calculating stop-loss price: {e}")
+            return 0.0
 
     def check_stop_loss(self, current_price: float, stop_loss_price: float) -> bool:
         """
@@ -106,7 +110,7 @@ async def main():
     print(f"Position size: {position_size} SOL")
 
     entry_price = 0.001234  # Example entry price
-    stop_loss_price = risk_manager.calculate_stop_loss_price(entry_price)
+    stop_loss_price = await risk_manager.calculate_stop_loss_price(entry_price)
     print(f"Stop-loss price: {stop_loss_price}")
 
     current_price = 0.0011  # Example current price

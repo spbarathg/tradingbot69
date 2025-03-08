@@ -32,14 +32,11 @@ class MomentumScalper:
                 return price_data
 
         # Rate limiting
-        time_since_last_call = datetime.now() - self.last_api_call_time
-        if time_since_last_call < self.api_call_interval:
-            await asyncio.sleep((self.api_call_interval - time_since_last_call).total_seconds())
-        self.last_api_call_time = datetime.now()
+        await self._enforce_rate_limit()
 
         price_data = await self.price_fetcher.get_price_dexscreener(token_address)
         if not price_data:
-            logger.warning(f"Price data not available for {token_address}.")
+            logger.warning(f"Price data not available for {token_address}. Skipping buy signal check.")
             return None
 
         # Update cache
@@ -56,10 +53,7 @@ class MomentumScalper:
                 return tweets
 
         # Rate limiting
-        time_since_last_call = datetime.now() - self.last_api_call_time
-        if time_since_last_call < self.api_call_interval:
-            await asyncio.sleep((self.api_call_interval - time_since_last_call).total_seconds())
-        self.last_api_call_time = datetime.now()
+        await self._enforce_rate_limit()
 
         query = f"{token_symbol} OR {token_address}"
         tweets = await self.social_scraper.scrape_twitter(query, num_tweets=num_tweets)
@@ -112,7 +106,7 @@ class MomentumScalper:
             logger.error(f"Error checking buy signal for {token_address}: {e}")
             return False
 
-    def check_sell_signal(self, entry_price: float, current_price: float, surge_potential: bool = False) -> bool:
+    async def check_sell_signal(self, entry_price: float, current_price: float, surge_potential: bool = False) -> bool:
         """
         Checks for a sell signal based on profit threshold and surge potential.
         
@@ -149,7 +143,7 @@ class MomentumScalper:
         logger.info(f"Fetching historical price for {token_address}, {time_ago} ago.")
         return None
 
-    def calculate_atr_stop_loss(self, historical_prices: Dict[str, List[float]], current_price: float, atr_period: int = 14, atr_multiplier: int = 2) -> Optional[float]:
+    async def calculate_atr_stop_loss(self, historical_prices: Dict[str, List[float]], current_price: float, atr_period: int = 14, atr_multiplier: int = 2) -> Optional[float]:
         """
         Calculates a dynamic stop-loss based on Average True Range (ATR).
         
@@ -171,6 +165,15 @@ class MomentumScalper:
             logger.error(f"Error calculating ATR stop loss: {e}")
             return None
 
+    async def _enforce_rate_limit(self) -> None:
+        """
+        Ensures API calls respect the rate limit.
+        """
+        time_since_last_call = datetime.now() - self.last_api_call_time
+        if time_since_last_call < self.api_call_interval:
+            await asyncio.sleep((self.api_call_interval - time_since_last_call).total_seconds())
+        self.last_api_call_time = datetime.now()
+
 
 # Example usage
 async def main():
@@ -187,7 +190,7 @@ async def main():
     # Check Sell Signal
     entry_price = 0.001  # Replace with your actual entry price
     current_price = 0.0015  # Replace with your current price
-    sell_signal = scalper.check_sell_signal(entry_price, current_price)
+    sell_signal = await scalper.check_sell_signal(entry_price, current_price)
 
     if sell_signal:
         print("Sell signal detected.")

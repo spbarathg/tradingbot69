@@ -4,11 +4,13 @@ from solana.rpc.async_api import AsyncClient
 from solana.transaction import Transaction
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
+from solders.signature import Signature
+from solders.rpc.config import RpcContextConfig
+from solders.transaction_status import TransactionConfirmationStatus
 from ..utils.logger import logger
 from ..utils.config import config
 from ..utils.helpers import check_enough_sol_balance
 import base64
-import time
 from typing import Optional, Dict
 
 
@@ -58,6 +60,40 @@ class JupiterSwap:
         """Check if wallet has enough SOL balance for the swap."""
         return check_enough_sol_balance(wallet_address, amount)
 
+    async def confirm_transaction(self, tx_signature: str) -> bool:
+        """
+        Confirm that a transaction is finalized on the Solana blockchain.
+        
+        Args:
+            tx_signature: The transaction signature (hash) to monitor.
+        
+        Returns:
+            bool: True if the transaction is confirmed, False otherwise.
+        """
+        signature = Signature.from_string(tx_signature)
+        for attempt in range(self.max_retries):
+            try:
+                # Fetch the transaction status
+                tx_status = await self.solana_client.get_signature_status(signature, RpcContextConfig(commitment="confirmed"))
+                if tx_status is None:
+                    logger.warning(f"Transaction {tx_signature} not found (attempt {attempt + 1}/{self.max_retries})")
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
+                    continue
+
+                # Check if the transaction is confirmed
+                if tx_status.confirmation_status == TransactionConfirmationStatus.Finalized:
+                    logger.info(f"Transaction {tx_signature} confirmed.")
+                    return True
+                else:
+                    logger.warning(f"Transaction {tx_signature} not yet finalized (attempt {attempt + 1}/{self.max_retries})")
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
+            except Exception as e:
+                logger.error(f"Error confirming transaction {tx_signature}: {e}")
+                await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
+
+        logger.error(f"Failed to confirm transaction {tx_signature} after {self.max_retries} attempts.")
+        return False
+
     async def swap(self, input_mint: str, output_mint: str, amount: float) -> Optional[str]:
         """Executes a token swap using Jupiter with retry logic."""
         wallet_keypair = self._get_wallet_keypair()
@@ -84,8 +120,14 @@ class JupiterSwap:
                 transaction.sign(wallet_keypair)
                 tx_signature = await self.solana_client.send_raw_transaction(transaction.to_bytes())
                 logger.info(f"Swap executed. Transaction signature: {tx_signature}")
-                return tx_signature
 
+                # Step 4: Confirm Transaction
+                confirmed = await self.confirm_transaction(tx_signature)
+                if confirmed:
+                    return tx_signature
+                else:
+                    logger.error(f"Transaction {tx_signature} not confirmed (Attempt {attempt + 1}/{self.max_retries}).")
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
             except Exception as e:
                 logger.error(f"Error executing swap (Attempt {attempt + 1}/{self.max_retries}): {e}")
                 await asyncio.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
