@@ -1,5 +1,5 @@
 import asyncio
-import aiohttp
+import aiohttp # type: ignore
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timedelta
 
