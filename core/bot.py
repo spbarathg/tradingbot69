@@ -10,24 +10,18 @@ from ..utils.helpers import is_valid_solana_address
 
 class TradingBot:
     def __init__(self):
-        self.price_fetcher = PriceFetcher()
-        self.momentum_scalper = MomentumScalper()
-        self.risk_manager = RiskManager()
-        self.jupiter_swap = JupiterSwap()
-        self.surge_detector = SurgeDetector()
-        self.config = config
-        self.wallet_address = ""
-        try:
-            from solders.keypair import Keypair
-            wallet_keypair = Keypair.from_base58_string(self.config.WALLET_PRIVATE_KEY)
-            self.wallet_address = str(wallet_keypair.pubkey())
-        except Exception as e:
-            logger.error(f"Private key is invalid or missing: {e}")
-        self.active_positions = {}  # Dictionary to track active positions (token_address: entry_price)
-        self.is_valid_solana_address = is_valid_solana_address(self.wallet_address)
-        if not self.is_valid_solana_address:
-            logger.error("Wallet Address is invalid. Please ensure the private key is the right one.")
+        # (Previous code)
+        self.learning_rate = 0.1
+        self.discount_factor = 0.9
 
+    def choose_action(self, state):
+      """Chooses an action based on the current state (exploration vs exploitation)."""
+      #TODO: Implement Exploration and Exploitation to test for reinforcement learning
+      pass
+    def update_q_value(self, state, action, reward, next_state):
+      """Updates Q-value based on the reward received and the next state."""
+      #TODO: Implement Exploration and Exploitation to test for reinforcement learning
+      pass
     def trade_loop(self, token_addresses: list):
         """
         Main trading loop that continuously checks for buy and sell signals.
@@ -118,9 +112,8 @@ class TradingBot:
                     time.sleep(60)  # Wait longer after an error
         else:
             logger.error("Trading cannot begin")
-
 # Example Usage (in main.py or a test script)
 if __name__ == '__main__':
     bot = TradingBot()
-    token_addresses = ["EjmcZ9EcE6JMRyASG4sJ49tfzdR16gJ1eQGm2UjGVkJ"]  # Replace with real token addresses
+    token_addresses = ["So1111111111111111111111111111111111111112","EPjFWdd5AufqALUs2vW0ouAZnuuzqvTZcztBbuw61zPX"]  # Replace with real token addresses
     bot.trade_loop(token_addresses)

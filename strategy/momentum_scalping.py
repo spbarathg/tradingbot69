@@ -1,3 +1,4 @@
+import talib  # Import TA-Lib
 from ..data_acquisition.realtime_prices import PriceFetcher
 from ..data_acquisition.social_scraper import SocialScraper
 from ..utils.logger import logger
@@ -93,7 +94,21 @@ class MomentumScalper:
         """
         #Place holder since the current implementation needs the historical price to fully function
         return None
+    
+    def calculate_atr_stop_loss(self, historical_prices, atr_period=14, atr_multiplier=2):
+        """
+        Calculates a dynamic stop-loss based on Average True Range (ATR).
+        """
+        try:
+            atr = talib.ATR(historical_prices['high'], historical_prices['low'], historical_prices['close'], timeperiod=atr_period)[-1]  # Use last ATR value
 
+            stop_loss = current_price - (atr_multiplier * atr)
+
+            return stop_loss
+
+        except Exception as e:
+            logger.error(f"Error calculating ATR stop loss: {e}")
+            return None
 
 # Example usage
 if __name__ == '__main__':
